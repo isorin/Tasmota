@@ -134,6 +134,7 @@
 #define D_JSON_POWERFACTOR "Factor"
 #define D_JSON_POWERMAX "MaxPower"
 #define D_JSON_POWERUSAGE "Power"
+#define D_JSON_AVERAGE_POWER "AveragePower"
 #define D_JSON_ACTIVE_POWERUSAGE "ActivePower"
 #define D_JSON_APPARENT_POWERUSAGE "ApparentPower"
 #define D_JSON_REACTIVE_POWERUSAGE "ReactivePower"

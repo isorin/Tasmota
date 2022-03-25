@@ -51,6 +51,9 @@ struct DHTSTRUCT {
   char     stype[12];
   float    t = NAN;
   float    h = NAN;
+  float    t_sum = NAN;
+  float    h_sum = NAN;
+  uint16_t n_read = 0;
 } Dht[DHT_MAX_SENSORS];
 
 bool DhtWaitState(uint32_t sensor, uint32_t level) {
@@ -172,6 +175,17 @@ bool DhtRead(uint32_t sensor) {
   Dht[sensor].t = ConvertTemp(temperature);
   Dht[sensor].lastresult = 0;
 
+  if (Settings->flag5.ds18x20_mean) {
+    if (++Dht[sensor].n_read == 1) {
+      Dht[sensor].t_sum = 0;
+      Dht[sensor].h_sum = 0;
+    }
+    Dht[sensor].t_sum += Dht[sensor].t;
+    Dht[sensor].h_sum += Dht[sensor].h;
+    AddLog(LOG_LEVEL_DEBUG, PSTR("DHT: t_sum %2_f, h_sum %2_f, n_read %d"),
+        &Dht[sensor].t_sum, &Dht[sensor].h_sum, Dht[sensor].n_read);
+  }
+
   return true;
 }
 
@@ -232,6 +246,16 @@ void DhtEverySecond(void) {
 
 void DhtShow(bool json) {
   for (uint32_t i = 0; i < dht_sensors; i++) {
+    if (json && Settings->flag5.ds18x20_mean) {
+      if ((0 == TasmotaGlobal.tele_period) && Dht[i].n_read) {
+        Dht[i].t = Dht[i].t_sum / Dht[i].n_read;
+        Dht[i].h = Dht[i].h_sum / Dht[i].n_read;
+        Dht[i].n_read = 0;
+        AddLog(LOG_LEVEL_DEBUG, PSTR("DHT: t_avg %2_f, h_avg %2_f, n_read %d"),
+            &Dht[i].t, &Dht[i].h, Dht[i].n_read);
+      }
+    }
+
     TempHumDewShow(json, ((0 == TasmotaGlobal.tele_period) && (0 == i)), Dht[i].stype, Dht[i].t, Dht[i].h);
   }
 }
