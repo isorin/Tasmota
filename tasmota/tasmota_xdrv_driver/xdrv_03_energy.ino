@@ -125,6 +125,17 @@ struct ENERGY {
   bool min_current_flag;
   bool max_current_flag;
 
+  int32_t avg_last_kWhtoday[ENERGY_MAX_PHASES];
+  int32_t avg_last_kWhtoday_delta[ENERGY_MAX_PHASES];
+  int32_t avg_last_energy[ENERGY_MAX_PHASES];   // deca micro Wh
+
+  uint32_t avg_delta_diff[ENERGY_MAX_PHASES];
+  uint8_t avg_delta_pct[ENERGY_MAX_PHASES];
+
+  int16_t avg_publish_secs[ENERGY_MAX_PHASES];
+  uint8_t avg_interval_secs[ENERGY_MAX_PHASES];
+  uint8_t avg_counter_secs[ENERGY_MAX_PHASES];
+
 #ifdef USE_ENERGY_POWER_LIMIT
   uint16_t mplh_counter;
   uint16_t mplw_counter;
@@ -426,6 +437,7 @@ void EnergyMarginCheck(void) {
   }
 
   bool jsonflg = false;
+  bool jsonflg2 = false;
   Response_P(PSTR("{\"" D_RSLT_MARGINS "\":{"));
 
   int16_t power_diff[ENERGY_MAX_PHASES] = { 0 };
@@ -434,7 +446,51 @@ void EnergyMarginCheck(void) {
 
 //    AddLog(LOG_LEVEL_DEBUG, PSTR("NRG: APower %d, HPower0 %d, HPower1 %d, HPower2 %d"), active_power, Energy.power_history[phase][0], Energy.power_history[phase][1], Energy.power_history[phase][2]);
 
-    if (Settings->energy_power_delta[phase]) {
+    if (Settings->energy_power_delta[phase] >= 10100) {
+      // recalculate if needed
+      if (Energy.avg_interval_secs[phase] == 0) {
+        Energy.avg_interval_secs[phase] = (Settings->energy_power_delta[phase] - 10000) / 100;
+        Energy.avg_delta_pct[phase] = (Settings->energy_power_delta[phase] - 10000) % 100;
+        AddLog(LOG_LEVEL_DEBUG, PSTR("NRG #%d: avg_interval_secs %d, avg_delta_pct %d, tele_period %d"),
+            phase, Energy.avg_interval_secs[phase], Energy.avg_delta_pct[phase], Settings->tele_period);
+        // init/reset some values
+        Energy.avg_publish_secs[phase] = 0;
+        Energy.avg_counter_secs[phase] = 0;
+        Energy.avg_last_energy[phase] = 0;
+        // 10 is 0.36Wh
+        Energy.avg_delta_diff[phase] = Energy.avg_delta_pct[phase] == 0 ? 0 : 10 * Energy.avg_interval_secs[phase];
+        Energy.avg_last_kWhtoday[phase] = Energy.kWhtoday[phase];
+        Energy.avg_last_kWhtoday_delta[phase] = Energy.kWhtoday_delta[phase];
+      }
+      else if (++Energy.avg_counter_secs[phase] >= Energy.avg_interval_secs[phase]) {
+        Energy.avg_publish_secs[phase] -= Energy.avg_interval_secs[phase];
+        int32_t energy = (Energy.kWhtoday[phase] - Energy.avg_last_kWhtoday[phase]) * 1000
+                       + (Energy.kWhtoday_delta[phase] - Energy.avg_last_kWhtoday_delta[phase]);
+        if (energy < 0) energy = 0;
+        uint32_t delta = abs(energy - Energy.avg_last_energy[phase]);
+        AddLog(LOG_LEVEL_DEBUG, PSTR("NRG #%d: energy %d, last_energy %d, delta %d, delta_diff %d, pub_secs %d"),
+          phase, energy, Energy.avg_last_energy[phase], delta, Energy.avg_delta_diff[phase], Energy.avg_publish_secs[phase]);
+        if (delta >= Energy.avg_delta_diff[phase] || Energy.avg_publish_secs[phase] <= 0) {
+          float avg_power = static_cast<float>(energy) * 0.036 / Energy.avg_interval_secs[phase];
+          char value_chr[FLOATSZ * ENERGY_MAX_PHASES];
+          ResponseAppend_P(PSTR("\"" D_JSON_AVERAGE_POWER "\":%s"), EnergyFormat(value_chr, &avg_power, Settings->flag2.wattage_resolution));
+          Energy.avg_publish_secs[phase] = Settings->tele_period > 0 ? Settings->tele_period : 300;
+          Energy.avg_last_energy[phase] = energy;
+          // prevent overflow
+          Energy.avg_delta_diff[phase] = energy > 40000000 ? (energy / 100) * Energy.avg_delta_pct[phase] :
+                                                             (energy * Energy.avg_delta_pct[phase]) / 100;
+          if (Energy.avg_delta_pct[phase] != 0) {
+            uint32_t min_delta = 10 * Energy.avg_interval_secs[phase];
+            if (Energy.avg_delta_diff[phase] < min_delta) Energy.avg_delta_diff[phase] = min_delta;
+          }
+          jsonflg2 = true;
+        }
+        Energy.avg_counter_secs[phase] = 0;
+        Energy.avg_last_kWhtoday[phase] = Energy.kWhtoday[phase];
+        Energy.avg_last_kWhtoday_delta[phase] = Energy.kWhtoday_delta[phase];
+      }
+    }
+    else if (Settings->energy_power_delta[phase]) {
       power_diff[phase] = active_power - Energy.power_history[phase][0];
       uint16_t delta = abs(power_diff[phase]);
       bool threshold_met = false;
@@ -459,10 +515,10 @@ void EnergyMarginCheck(void) {
       } else {
         power_diff[phase] = 0;
       }
+      Energy.power_history[phase][0] = Energy.power_history[phase][1];  // Shift in history every second allowing power changes to settle for up to three seconds
+      Energy.power_history[phase][1] = Energy.power_history[phase][2];
+      Energy.power_history[phase][2] = active_power;
     }
-    Energy.power_history[phase][0] = Energy.power_history[phase][1];  // Shift in history every second allowing power changes to settle for up to three seconds
-    Energy.power_history[phase][1] = Energy.power_history[phase][2];
-    Energy.power_history[phase][2] = active_power;
   }
   if (jsonflg) {
     float power_diff_f[Energy.phase_count];
@@ -507,10 +563,10 @@ void EnergyMarginCheck(void) {
       jsonflg = true;
     }
   }
-  if (jsonflg) {
+  if (jsonflg || jsonflg2) {
     ResponseJsonEndEnd();
     MqttPublishPrefixTopicRulesProcess_P(TELE, PSTR(D_RSLT_MARGINS), MQTT_TELE_RETAIN);
-    EnergyMqttShow();
+    if (jsonflg) EnergyMqttShow();
   }
 
 #ifdef USE_ENERGY_POWER_LIMIT
@@ -974,6 +1030,8 @@ void CmndPowerDelta(void) {
   if ((XdrvMailbox.index > 0) && (XdrvMailbox.index <= ENERGY_MAX_PHASES)) {
     if ((XdrvMailbox.payload >= 0) && (XdrvMailbox.payload <= 32000)) {
       Settings->energy_power_delta[XdrvMailbox.index -1] = XdrvMailbox.payload;
+      // indicator to recalculate
+      Energy.avg_interval_secs[XdrvMailbox.index -1] = 0;
     }
     ResponseCmndIdxNumber(Settings->energy_power_delta[XdrvMailbox.index -1]);
   }
