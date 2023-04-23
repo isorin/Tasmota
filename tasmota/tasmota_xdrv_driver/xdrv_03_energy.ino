@@ -507,37 +507,43 @@ void EnergyMarginCheck(void) {
         Energy->avg_last_kWhtoday_delta[phase] = Energy->kWhtoday_delta[phase];
       }
       else if (++Energy->avg_counter_secs[phase] >= Energy->avg_interval_secs[phase]) {
-        Energy->avg_publish_secs[phase] += Energy->avg_interval_secs[phase];
         int32_t energy = (Energy->kWhtoday[phase] - Energy->avg_last_kWhtoday[phase]) * 1000
                        + (Energy->kWhtoday_delta[phase] - Energy->avg_last_kWhtoday_delta[phase]);
-        if (energy < 0) energy = 0;
-        Energy->avg_total_energy[phase] += energy;
-        uint32_t delta = abs(energy - Energy->avg_last_energy[phase]);
-        AddLog(LOG_LEVEL_DEBUG, PSTR("NRG #%d: energy %d, last %d, total %d, delta %d, diff %d, pub_secs %d"),
-          phase, energy, Energy->avg_last_energy[phase], Energy->avg_total_energy[phase],
-          delta, Energy->avg_delta_diff[phase], Energy->avg_publish_secs[phase]);
-        bool publish_delta = (delta >= Energy->avg_delta_diff[phase]);
-        if (publish_delta || Energy->avg_publish_secs[phase] >= Settings->tele_period) {
-          if (!publish_delta) {
-            uint16_t num_intervals = Energy->avg_publish_secs[phase] / Energy->avg_interval_secs[phase];
-            if (num_intervals > 0) {
-              energy = Energy->avg_total_energy[phase] / num_intervals;
-              AddLog(LOG_LEVEL_DEBUG, PSTR("NRG #%d: using avg_energy %d"), phase, energy);
+        // skip this interval if energy < 0 (e.g. reset at midnight)
+        if (energy < 0) {
+          AddLog(LOG_LEVEL_DEBUG, PSTR("NRG #%d: skip negative energy %d, last %d, total %d, pub_secs %d"),
+            phase, energy, Energy->avg_last_energy[phase], Energy->avg_total_energy[phase], Energy->avg_publish_secs[phase]);
+        }
+        else {
+          Energy->avg_publish_secs[phase] += Energy->avg_interval_secs[phase];
+          Energy->avg_total_energy[phase] += energy;
+          uint32_t delta = abs(energy - Energy->avg_last_energy[phase]);
+          AddLog(LOG_LEVEL_DEBUG, PSTR("NRG #%d: energy %d, last %d, total %d, delta %d, diff %d, pub_secs %d"),
+            phase, energy, Energy->avg_last_energy[phase], Energy->avg_total_energy[phase],
+            delta, Energy->avg_delta_diff[phase], Energy->avg_publish_secs[phase]);
+          bool publish_delta = (delta >= Energy->avg_delta_diff[phase]);
+          if (publish_delta || Energy->avg_publish_secs[phase] >= Settings->tele_period) {
+            if (!publish_delta) {
+              uint16_t num_intervals = Energy->avg_publish_secs[phase] / Energy->avg_interval_secs[phase];
+              if (num_intervals > 0) {
+                energy = Energy->avg_total_energy[phase] / num_intervals;
+                AddLog(LOG_LEVEL_DEBUG, PSTR("NRG #%d: using avg_energy %d"), phase, energy);
+              }
             }
+            float avg_power = static_cast<float>(energy) * 0.036 / Energy->avg_interval_secs[phase];
+            ResponseAppend_P(PSTR("\"" D_JSON_AVERAGE_POWER "\":%s"), EnergyFmt(&avg_power, Settings->flag2.wattage_resolution, 1));
+            Energy->avg_publish_secs[phase] = 0;
+            Energy->avg_total_energy[phase] = 0;
+            Energy->avg_last_energy[phase] = energy;
+            // prevent overflow
+            Energy->avg_delta_diff[phase] = energy > 40000000 ? (energy / 100) * Energy->avg_delta_pct[phase] :
+                                                              (energy * Energy->avg_delta_pct[phase]) / 100;
+            if (Energy->avg_delta_pct[phase] != 0) {
+              uint32_t min_delta = 10 * Energy->avg_interval_secs[phase];
+              if (Energy->avg_delta_diff[phase] < min_delta) Energy->avg_delta_diff[phase] = min_delta;
+            }
+            jsonflg2 = true;
           }
-          float avg_power = static_cast<float>(energy) * 0.036 / Energy->avg_interval_secs[phase];
-          ResponseAppend_P(PSTR("\"" D_JSON_AVERAGE_POWER "\":%s"), EnergyFmt(&avg_power, Settings->flag2.wattage_resolution, 1));
-          Energy->avg_publish_secs[phase] = 0;
-          Energy->avg_total_energy[phase] = 0;
-          Energy->avg_last_energy[phase] = energy;
-          // prevent overflow
-          Energy->avg_delta_diff[phase] = energy > 40000000 ? (energy / 100) * Energy->avg_delta_pct[phase] :
-                                                             (energy * Energy->avg_delta_pct[phase]) / 100;
-          if (Energy->avg_delta_pct[phase] != 0) {
-            uint32_t min_delta = 10 * Energy->avg_interval_secs[phase];
-            if (Energy->avg_delta_diff[phase] < min_delta) Energy->avg_delta_diff[phase] = min_delta;
-          }
-          jsonflg2 = true;
         }
         Energy->avg_counter_secs[phase] = 0;
         Energy->avg_last_kWhtoday[phase] = Energy->kWhtoday[phase];
